@@ -1,0 +1,8 @@
+[package]
+name = "winit-ext"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# TODO: Figure out which versions of winit we are compatible with.
+winit = "0.30.5"
