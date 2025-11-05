@@ -29,16 +29,8 @@ pub trait ApplicationResumed<TUserEvent: 'static = ()>: Sized {
         self,
         event_loop: &winit::event_loop::ActiveEventLoop,
         event: EventResumed<TUserEvent>,
-    ) -> Result<Self, <Self::Application as Application<TUserEvent>>::Error> {
-        if let EventResumed::WindowEvent {
-            window_id: _,
-            event: winit::event::WindowEvent::CloseRequested,
-        } = event
-        {
-            event_loop.exit()
-        }
-        Ok(self)
-    }
+    ) -> Result<Self, <Self::Application as Application<TUserEvent>>::Error>;
+
     fn suspend(
         self,
         event_loop: &winit::event_loop::ActiveEventLoop,
@@ -46,6 +38,7 @@ pub trait ApplicationResumed<TUserEvent: 'static = ()>: Sized {
         <Self::Application as Application<TUserEvent>>::Suspended,
         <Self::Application as Application<TUserEvent>>::Error,
     >;
+
     fn exit(
         self,
         event_loop: &winit::event_loop::ActiveEventLoop,
@@ -62,10 +55,8 @@ pub trait ApplicationSuspended<TUserEvent: 'static = ()>: Sized {
         self,
         event_loop: &winit::event_loop::ActiveEventLoop,
         event: EventSuspended<TUserEvent>,
-    ) -> Result<Self, <Self::Application as Application<TUserEvent>>::Error> {
-        let _ = (event_loop, event);
-        Ok(self)
-    }
+    ) -> Result<Self, <Self::Application as Application<TUserEvent>>::Error>;
+
     fn resume(
         self,
         event_loop: &winit::event_loop::ActiveEventLoop,
@@ -73,6 +64,7 @@ pub trait ApplicationSuspended<TUserEvent: 'static = ()>: Sized {
         <Self::Application as Application<TUserEvent>>::Resumed,
         <Self::Application as Application<TUserEvent>>::Error,
     >;
+
     fn exit(
         self,
         event_loop: &winit::event_loop::ActiveEventLoop,
@@ -83,7 +75,7 @@ pub trait ApplicationSuspended<TUserEvent: 'static = ()>: Sized {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum EventResumed<T: 'static> {
+pub enum EventResumed<TUserEvent: 'static = ()> {
     NewEvents(winit::event::StartCause),
     WindowEvent {
         window_id: winit::window::WindowId,
@@ -93,40 +85,21 @@ pub enum EventResumed<T: 'static> {
         device_id: winit::event::DeviceId,
         event: winit::event::DeviceEvent,
     },
-    UserEvent(T),
+    UserEvent(TUserEvent),
     AboutToWait,
     MemoryWarning,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum EventSuspended<T: 'static> {
+pub enum EventSuspended<TUserEvent: 'static = ()> {
     NewEvents(winit::event::StartCause),
     DeviceEvent {
         device_id: winit::event::DeviceId,
         event: winit::event::DeviceEvent,
     },
-    UserEvent(T),
+    UserEvent(TUserEvent),
     AboutToWait,
     MemoryWarning,
-}
-
-struct Adapter<TApplication: Application<TUserEvent>, TUserEvent: 'static>(
-    Takeable<Result<State<TApplication, TUserEvent>, TApplication::Error>>,
-);
-
-impl<TApplication: Application<TUserEvent>, TUserEvent: 'static> Adapter<TApplication, TUserEvent> {
-    pub fn new(state: TApplication::Uninitialized) -> Self {
-        Self(Takeable::new(Ok(State::Uninitialized(state))))
-    }
-
-    pub fn exit(self) -> Result<TApplication::Exited, TApplication::Error> {
-        Ok(match self.0.get()? {
-            State::Uninitialized(_) => invalid_transition(),
-            State::Resumed(_) => invalid_transition(),
-            State::Suspended(_) => invalid_transition(),
-            State::Exited(state) => state,
-        })
-    }
 }
 
 enum State<TApplicationState: Application<TUserEvent>, TUserEvent: 'static> {
@@ -140,13 +113,28 @@ fn invalid_transition() -> ! {
     unreachable!("invalid transition")
 }
 
-impl<TApplicationState: Application<TUserEvent>, TUserEvent: 'static>
-    Adapter<TApplicationState, TUserEvent>
-{
+struct Adapter<TApplication: Application<TUserEvent>, TUserEvent: 'static>(
+    Takeable<Result<State<TApplication, TUserEvent>, TApplication::Error>>,
+);
+
+impl<TApplication: Application<TUserEvent>, TUserEvent> Adapter<TApplication, TUserEvent> {
+    fn new(state: TApplication::Uninitialized) -> Self {
+        Self(Takeable::new(Ok(State::Uninitialized(state))))
+    }
+
+    fn exit(self) -> Result<TApplication::Exited, TApplication::Error> {
+        Ok(match self.0.get()? {
+            State::Uninitialized(_) => invalid_transition(),
+            State::Resumed(_) => invalid_transition(),
+            State::Suspended(_) => invalid_transition(),
+            State::Exited(state) => state,
+        })
+    }
+
     fn transition<
         F: FnOnce(
-            State<TApplicationState, TUserEvent>,
-        ) -> Result<State<TApplicationState, TUserEvent>, TApplicationState::Error>,
+            State<TApplication, TUserEvent>,
+        ) -> Result<State<TApplication, TUserEvent>, TApplication::Error>,
     >(
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
@@ -158,7 +146,7 @@ impl<TApplicationState: Application<TUserEvent>, TUserEvent: 'static>
     }
 }
 
-impl<TApplicationState: Application<TUserEvent>, TUserEvent: 'static>
+impl<TApplicationState: Application<TUserEvent>, TUserEvent>
     winit::application::ApplicationHandler<TUserEvent> for Adapter<TApplicationState, TUserEvent>
 {
     fn new_events(
@@ -309,11 +297,8 @@ type ApplicationResult<TApplication, TUserEvent> = Result<
 >;
 type EventLoopResult<T> = Result<T, winit::error::EventLoopError>;
 
-pub fn run<TApplicationUninitialized: ApplicationUninitialized<TUserEvent>, TUserEvent: 'static>(
-    event_loop: winit::event_loop::EventLoop<TUserEvent>,
-    state: TApplicationUninitialized,
-) -> EventLoopResult<ApplicationResult<TApplicationUninitialized::Application, TUserEvent>> {
-    let mut app = Adapter::<TApplicationUninitialized::Application, TUserEvent>::new(state);
+ pub fn run_app<TUserEvent, TApplicationUninitialized: ApplicationUninitialized<TUserEvent>>(event_loop: winit::event_loop::EventLoop<TUserEvent>, app: TApplicationUninitialized) -> EventLoopResult<ApplicationResult<TApplicationUninitialized::Application, TUserEvent>> {
+    let mut app = Adapter::<TApplicationUninitialized::Application, TUserEvent>::new(app);
     event_loop.run_app(&mut app)?;
     Ok(app.exit())
 }
