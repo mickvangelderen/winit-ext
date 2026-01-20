@@ -6,7 +6,7 @@ set -euo pipefail
 
 # The version is not pinned here nor in CI so we automatically stay up-to-date. If this causes too much churn we can
 # consider pinning the toolchain version.
-NIGHTLY=nightly-2024-09-22
+NIGHTLY=nightly-2026-01-10
 
 if ! cargo "+$NIGHTLY" --version >/dev/null 2>&1; then
     if command -v rustup >/dev/null 2>&1; then

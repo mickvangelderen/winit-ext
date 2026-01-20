@@ -1,304 +1,191 @@
-mod takeable;
+use winit::{
+    event::{DeviceEvent, DeviceId, StartCause, WindowEvent},
+    event_loop::ActiveEventLoop,
+    window::WindowId,
+};
 
-use crate::takeable::Takeable;
-
-pub trait Application<TUserEvent: 'static = ()>: Sized {
-    type Uninitialized: ApplicationUninitialized<TUserEvent, Application = Self>;
-    type Resumed: ApplicationResumed<TUserEvent, Application = Self>;
-    type Suspended: ApplicationSuspended<TUserEvent, Application = Self>;
-    type Exited;
+/// A version of [`winit::application::ApplicationHandler::new_events`] that provides `Self` by value and allows
+/// implementations to return an error type. When an error occurs, [`winit::event_loop::ActiveEventLoop::exit`] is
+/// called automatically and further events are ignored.
+pub trait ApplicationHandlerFallibleOwned<T: 'static = ()>: Sized {
     type Error;
-}
 
-pub trait ApplicationUninitialized<TUserEvent: 'static = ()>: Sized {
-    type Application: Application<TUserEvent, Uninitialized = Self>;
-
-    fn initialize(
-        self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> Result<
-        <Self::Application as Application<TUserEvent>>::Resumed,
-        <Self::Application as Application<TUserEvent>>::Error,
-    >;
-}
-
-pub trait ApplicationResumed<TUserEvent: 'static = ()>: Sized {
-    type Application: Application<TUserEvent, Resumed = Self>;
-
-    fn handle(
-        self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        event: EventResumed<TUserEvent>,
-    ) -> Result<Self, <Self::Application as Application<TUserEvent>>::Error>;
-
-    fn suspend(
-        self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> Result<
-        <Self::Application as Application<TUserEvent>>::Suspended,
-        <Self::Application as Application<TUserEvent>>::Error,
-    >;
-
-    fn exit(
-        self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> Result<
-        <Self::Application as Application<TUserEvent>>::Exited,
-        <Self::Application as Application<TUserEvent>>::Error,
-    >;
-}
-
-pub trait ApplicationSuspended<TUserEvent: 'static = ()>: Sized {
-    type Application: Application<TUserEvent, Suspended = Self>;
-
-    fn handle(
-        self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        event: EventSuspended<TUserEvent>,
-    ) -> Result<Self, <Self::Application as Application<TUserEvent>>::Error>;
-
-    fn resume(
-        self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> Result<
-        <Self::Application as Application<TUserEvent>>::Resumed,
-        <Self::Application as Application<TUserEvent>>::Error,
-    >;
-
-    fn exit(
-        self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-    ) -> Result<
-        <Self::Application as Application<TUserEvent>>::Exited,
-        <Self::Application as Application<TUserEvent>>::Error,
-    >;
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum EventResumed<TUserEvent: 'static = ()> {
-    NewEvents(winit::event::StartCause),
-    WindowEvent {
-        window_id: winit::window::WindowId,
-        event: winit::event::WindowEvent,
-    },
-    DeviceEvent {
-        device_id: winit::event::DeviceId,
-        event: winit::event::DeviceEvent,
-    },
-    UserEvent(TUserEvent),
-    AboutToWait,
-    MemoryWarning,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum EventSuspended<TUserEvent: 'static = ()> {
-    NewEvents(winit::event::StartCause),
-    DeviceEvent {
-        device_id: winit::event::DeviceId,
-        event: winit::event::DeviceEvent,
-    },
-    UserEvent(TUserEvent),
-    AboutToWait,
-    MemoryWarning,
-}
-
-enum State<TApplicationState: Application<TUserEvent>, TUserEvent: 'static> {
-    Uninitialized(TApplicationState::Uninitialized),
-    Resumed(TApplicationState::Resumed),
-    Suspended(TApplicationState::Suspended),
-    Exited(TApplicationState::Exited),
-}
-
-fn invalid_transition() -> ! {
-    unreachable!("invalid transition")
-}
-
-struct Adapter<TApplication: Application<TUserEvent>, TUserEvent: 'static>(
-    Takeable<Result<State<TApplication, TUserEvent>, TApplication::Error>>,
-);
-
-impl<TApplication: Application<TUserEvent>, TUserEvent> Adapter<TApplication, TUserEvent> {
-    fn new(state: TApplication::Uninitialized) -> Self {
-        Self(Takeable::new(Ok(State::Uninitialized(state))))
-    }
-
-    fn exit(self) -> Result<TApplication::Exited, TApplication::Error> {
-        Ok(match self.0.get()? {
-            State::Uninitialized(_) => invalid_transition(),
-            State::Resumed(_) => invalid_transition(),
-            State::Suspended(_) => invalid_transition(),
-            State::Exited(state) => state,
-        })
-    }
-
-    fn transition<
-        F: FnOnce(
-            State<TApplication, TUserEvent>,
-        ) -> Result<State<TApplication, TUserEvent>, TApplication::Error>,
-    >(
-        &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        f: F,
-    ) {
-        self.0.transition(|fallible_state| {
-            fallible_state.and_then(|state| f(state).inspect_err(|_| event_loop.exit()))
-        })
-    }
-}
-
-impl<TApplicationState: Application<TUserEvent>, TUserEvent>
-    winit::application::ApplicationHandler<TUserEvent> for Adapter<TApplicationState, TUserEvent>
-{
+    /// See [`winit::application::ApplicationHandler::new_events`].
     fn new_events(
-        &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        cause: winit::event::StartCause,
-    ) {
-        self.transition(event_loop, |state| {
-            Ok(match state {
-                State::Uninitialized(state) => match cause {
-                    winit::event::StartCause::Init => State::Resumed(state.initialize(event_loop)?),
-                    _ => invalid_transition(),
-                },
-                State::Resumed(state) => {
-                    State::Resumed(state.handle(event_loop, EventResumed::NewEvents(cause))?)
-                }
-                State::Suspended(state) => {
-                    State::Suspended(state.handle(event_loop, EventSuspended::NewEvents(cause))?)
-                }
-                State::Exited(_) => invalid_transition(),
-            })
-        })
+        self,
+        event_loop: &ActiveEventLoop,
+        cause: StartCause,
+    ) -> Result<Self, Self::Error> {
+        let _ = (event_loop, cause);
+        Ok(self)
     }
 
-    fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, event: TUserEvent) {
-        self.transition(event_loop, |state| {
-            Ok(match state {
-                State::Uninitialized(_) => invalid_transition(),
-                State::Resumed(state) => {
-                    State::Resumed(state.handle(event_loop, EventResumed::UserEvent(event))?)
-                }
-                State::Suspended(state) => {
-                    State::Suspended(state.handle(event_loop, EventSuspended::UserEvent(event))?)
-                }
-                State::Exited(_) => invalid_transition(),
-            })
-        })
+    /// See [`winit::application::ApplicationHandler::resumed`].
+    fn resumed(self, event_loop: &ActiveEventLoop) -> Result<Self, Self::Error>;
+
+    /// See [`winit::application::ApplicationHandler::user_event`].
+    fn user_event(self, event_loop: &ActiveEventLoop, event: T) -> Result<Self, Self::Error> {
+        let _ = (event_loop, event);
+        Ok(self)
     }
 
+    /// See [`winit::application::ApplicationHandler::window_event`].
+    fn window_event(
+        self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) -> Result<Self, Self::Error>;
+
+    /// See [`winit::application::ApplicationHandler::device_event`].
     fn device_event(
+        self,
+        event_loop: &ActiveEventLoop,
+        device_id: DeviceId,
+        event: DeviceEvent,
+    ) -> Result<Self, Self::Error> {
+        let _ = (event_loop, device_id, event);
+        Ok(self)
+    }
+
+    /// See [`winit::application::ApplicationHandler::about_to_wait`].
+    fn about_to_wait(self, event_loop: &ActiveEventLoop) -> Result<Self, Self::Error> {
+        let _ = event_loop;
+        Ok(self)
+    }
+
+    /// See [`winit::application::ApplicationHandler::suspended`].
+    fn suspended(self, event_loop: &ActiveEventLoop) -> Result<Self, Self::Error> {
+        let _ = event_loop;
+        Ok(self)
+    }
+
+    /// See [`winit::application::ApplicationHandler::exiting`].
+    fn exiting(self, event_loop: &ActiveEventLoop) -> Result<Self, Self::Error> {
+        let _ = event_loop;
+        Ok(self)
+    }
+
+    /// See [`winit::application::ApplicationHandler::memory_warning`].
+    fn memory_warning(self, event_loop: &ActiveEventLoop) -> Result<Self, Self::Error> {
+        let _ = event_loop;
+        Ok(self)
+    }
+}
+
+#[cold]
+const fn panic_poison() -> ! {
+    panic!("application handler re-used after a panic occured during a transition")
+}
+
+enum Takeable<T> {
+    Item(T),
+    Poison,
+}
+
+impl<T> Takeable<T> {
+    pub fn transition(&mut self, f: impl FnOnce(T) -> T) {
+        *self = Self::Item(f(std::mem::replace(self, Takeable::Poison).into_inner()))
+    }
+
+    pub fn into_inner(self) -> T {
+        match self {
+            Self::Item(item) => item,
+            Self::Poison => panic_poison(),
+        }
+    }
+}
+
+struct ApplicationHandlerWrapper<T, E> {
+    state: Takeable<Result<T, E>>,
+}
+
+impl<T, E> ApplicationHandlerWrapper<T, E> {
+    fn new(state: T) -> Self {
+        Self {
+            state: Takeable::Item(Ok(state)),
+        }
+    }
+
+    fn into_inner(self) -> Result<T, E> {
+        self.state.into_inner()
+    }
+
+    fn transition(
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
-        device_id: winit::event::DeviceId,
-        event: winit::event::DeviceEvent,
+        f: impl FnOnce(T) -> Result<T, E>,
     ) {
-        self.transition(event_loop, |state| {
-            Ok(match state {
-                State::Uninitialized(_) => invalid_transition(),
-                State::Resumed(state) => State::Resumed(
-                    state.handle(event_loop, EventResumed::DeviceEvent { device_id, event })?,
-                ),
-                State::Suspended(state) => State::Suspended(
-                    state.handle(event_loop, EventSuspended::DeviceEvent { device_id, event })?,
-                ),
-                State::Exited(_) => invalid_transition(),
-            })
-        })
+        self.state
+            .transition(|state| state.and_then(|state| f(state).inspect_err(|_| event_loop.exit())))
+    }
+}
+
+impl<Handler, UserEvent> winit::application::ApplicationHandler<UserEvent>
+    for ApplicationHandlerWrapper<Handler, Handler::Error>
+where
+    Handler: ApplicationHandlerFallibleOwned<UserEvent>,
+    UserEvent: 'static,
+{
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        self.transition(event_loop, |state| state.new_events(event_loop, cause));
     }
 
-    fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        self.transition(event_loop, |state| {
-            Ok(match state {
-                State::Uninitialized(_) => invalid_transition(),
-                State::Resumed(state) => {
-                    State::Resumed(state.handle(event_loop, EventResumed::AboutToWait)?)
-                }
-                State::Suspended(state) => {
-                    State::Suspended(state.handle(event_loop, EventSuspended::AboutToWait)?)
-                }
-                State::Exited(_) => invalid_transition(),
-            })
-        })
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.transition(event_loop, |state| state.resumed(event_loop));
     }
 
-    fn suspended(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        self.transition(event_loop, |state| {
-            Ok(match state {
-                State::Uninitialized(_) => invalid_transition(),
-                State::Resumed(state) => State::Suspended(state.suspend(event_loop)?),
-                State::Suspended(state) => State::Suspended(state),
-                State::Exited(_) => invalid_transition(),
-            })
-        })
-    }
-
-    fn exiting(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        self.transition(event_loop, |state| {
-            Ok(match state {
-                State::Uninitialized(_) => invalid_transition(),
-                State::Resumed(state) => State::Exited(state.exit(event_loop)?),
-                State::Suspended(state) => State::Exited(state.exit(event_loop)?),
-                State::Exited(_) => invalid_transition(),
-            })
-        })
-    }
-
-    fn memory_warning(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        self.transition(event_loop, |state| {
-            Ok(match state {
-                State::Uninitialized(_) => invalid_transition(),
-                State::Resumed(state) => {
-                    State::Resumed(state.handle(event_loop, EventResumed::MemoryWarning)?)
-                }
-                State::Suspended(state) => {
-                    State::Suspended(state.handle(event_loop, EventSuspended::MemoryWarning)?)
-                }
-                State::Exited(_) => invalid_transition(),
-            })
-        })
-    }
-
-    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        self.transition(event_loop, |state| {
-            Ok(match state {
-                State::Uninitialized(_) => invalid_transition(),
-                State::Resumed(state) => State::Resumed(state),
-                State::Suspended(state) => State::Resumed(state.resume(event_loop)?),
-                State::Exited(_) => invalid_transition(),
-            })
-        })
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        self.transition(event_loop, |state| state.user_event(event_loop, event));
     }
 
     fn window_event(
         &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
-        window_id: winit::window::WindowId,
-        event: winit::event::WindowEvent,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
     ) {
         self.transition(event_loop, |state| {
-            Ok(match state {
-                State::Uninitialized(_) => invalid_transition(),
-                State::Resumed(state) => State::Resumed(
-                    state.handle(event_loop, EventResumed::WindowEvent { window_id, event })?,
-                ),
-                State::Suspended(_) => {
-                    // TODO: Can we receive window events while suspended?
-                    invalid_transition()
-                }
-                State::Exited(_) => invalid_transition(),
-            })
-        })
+            state.window_event(event_loop, window_id, event)
+        });
+    }
+
+    fn device_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        self.transition(event_loop, |state| {
+            state.device_event(event_loop, device_id, event)
+        });
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.transition(event_loop, |state| state.about_to_wait(event_loop));
+    }
+
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        self.transition(event_loop, |state| state.suspended(event_loop));
+    }
+
+    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
+        self.transition(event_loop, |state| state.exiting(event_loop));
+    }
+
+    fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
+        self.transition(event_loop, |state| state.memory_warning(event_loop));
     }
 }
 
-type ApplicationResult<TApplication, TUserEvent> = Result<
-    <TApplication as Application<TUserEvent>>::Exited,
-    <TApplication as Application<TUserEvent>>::Error,
->;
-type EventLoopResult<T> = Result<T, winit::error::EventLoopError>;
-
- pub fn run_app<TUserEvent, TApplicationUninitialized: ApplicationUninitialized<TUserEvent>>(event_loop: winit::event_loop::EventLoop<TUserEvent>, app: TApplicationUninitialized) -> EventLoopResult<ApplicationResult<TApplicationUninitialized::Application, TUserEvent>> {
-    let mut app = Adapter::<TApplicationUninitialized::Application, TUserEvent>::new(app);
-    event_loop.run_app(&mut app)?;
-    Ok(app.exit())
+#[extend::ext(name = EventLoopExt)]
+pub impl<UserEvent: 'static> winit::event_loop::EventLoop<UserEvent> {
+    fn run_app_fallible_owned<Handler: ApplicationHandlerFallibleOwned<UserEvent>>(
+        self,
+        handler: Handler,
+    ) -> Result<Result<Handler, Handler::Error>, winit::error::EventLoopError> {
+        let mut wrapper = ApplicationHandlerWrapper::new(handler);
+        self.run_app(&mut wrapper)?;
+        Ok(wrapper.into_inner())
+    }
 }

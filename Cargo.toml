@@ -1,12 +1,11 @@
 [package]
 name = "winit-ext"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
-# Example deps
-[target.'cfg(not(test))'.dev-dependencies]
-softbuffer = "0.4.6"
-
 [dependencies]
-# TODO: Figure out which versions of winit we are compatible with.
+extend = "1.2.0"
 winit = "0.30.12"
+
+[dev-dependencies]
+softbuffer = "0.4.6"
